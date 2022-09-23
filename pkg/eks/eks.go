@@ -37,9 +37,10 @@ func (e *EKSClient) CreateRole(name string) (*iam.Role, error) {
 		"arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy",
 		"arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy",
 		"arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly",
+		"arn:aws:iam::aws:policy/AmazonEKSClusterPolicy",
 	}
 	params := &iam.CreateRoleInput{
-		AssumeRolePolicyDocument: aws.String("{\"Version\": \"2012-10-17\",\"Statement\": [{\"Effect\": \"Allow\",\"Principal\": {\"Service\": \"ec2.amazonaws.com\"},\"Action\": \"sts:AssumeRole\"}]}"),
+		AssumeRolePolicyDocument: aws.String("{\"Version\": \"2012-10-17\",\"Statement\": [{\"Effect\": \"Allow\",\"Principal\": {\"Service\": \"ec2.amazonaws.com\"},\"Action\": \"sts:AssumeRole\"}, {\"Effect\": \"Allow\",\"Principal\": {\"Service\": \"eks.amazonaws.com\"},\"Action\": \"sts:AssumeRole\"}]}"),
 		Description:              aws.String("Role description"),
 		RoleName:                 aws.String("managed-nodegroup-scope"),
 	}
@@ -59,6 +60,28 @@ func (e *EKSClient) CreateRole(name string) (*iam.Role, error) {
 	}
 	return role.Role, nil
 }
+func (e *EKSClient) DeleteRole(name string) error {
+	policies, err := e.iam.ListAttachedRolePolicies(&iam.ListAttachedRolePoliciesInput{
+		RoleName: aws.String(name),
+	})
+	if err != nil {
+		return err
+	}
+	for _, policy := range policies.AttachedPolicies {
+		_, err := e.iam.DetachRolePolicy(&iam.DetachRolePolicyInput{
+			RoleName:  aws.String(name),
+			PolicyArn: policy.PolicyArn,
+		})
+		if err != nil {
+			return err
+		}
+	}
+	params := &iam.DeleteRoleInput{
+		RoleName: aws.String(name),
+	}
+	_, err = e.iam.DeleteRole(params)
+	return err
+}
 
 func (e *EKSClient) DescribeRole(name string) (*iam.Role, error) {
 	role, err := e.iam.GetRole(&iam.GetRoleInput{RoleName: aws.String(name)})
@@ -68,7 +91,7 @@ func (e *EKSClient) DescribeRole(name string) (*iam.Role, error) {
 	return role.Role, nil
 }
 
-func (e *EKSClient) CreateCluster() error {
+func (e *EKSClient) CreateCluster(roleArn *string) error {
 	vpcID, err := e.GetDefaultVPC()
 	if err != nil {
 		return err
@@ -88,7 +111,7 @@ func (e *EKSClient) CreateCluster() error {
 			SecurityGroupIds: secGroups,
 			SubnetIds:        subnets,
 		},
-		RoleArn: aws.String("rolearn"),
+		RoleArn: roleArn,
 	})
 	fmt.Println(result)
 	return err
