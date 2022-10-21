@@ -9,30 +9,34 @@ import (
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/eks"
 	"github.com/aws/aws-sdk-go/service/iam"
+	"github.com/gen1us2k/kubeprov/pkg/config"
+	"github.com/google/uuid"
 )
 
 type (
 	EKSClient struct {
-		ec2 *ec2.EC2
-		eks *eks.EKS
-		iam *iam.IAM
+		ec2  *ec2.EC2
+		eks  *eks.EKS
+		iam  *iam.IAM
+		conf *config.Config
 	}
 )
 
-func NewEKSClient() (*EKSClient, error) {
+func NewEKSClient(c *config.Config) (*EKSClient, error) {
 	sess, err := session.NewSession(&aws.Config{
-		Region: aws.String("eu-central-1"),
+		Region: aws.String(c.Region),
 	})
 	if err != nil {
 		return nil, err
 	}
 	return &EKSClient{
-		ec2: ec2.New(sess),
-		eks: eks.New(sess),
-		iam: iam.New(sess),
+		ec2:  ec2.New(sess),
+		eks:  eks.New(sess),
+		iam:  iam.New(sess),
+		conf: c,
 	}, nil
 }
-func (e *EKSClient) CreateRole(name string) (*iam.Role, error) {
+func (e *EKSClient) CreateRole() (*iam.Role, error) {
 	var managedPolicyArns = []string{
 		"arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy",
 		"arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy",
@@ -41,8 +45,8 @@ func (e *EKSClient) CreateRole(name string) (*iam.Role, error) {
 	}
 	params := &iam.CreateRoleInput{
 		AssumeRolePolicyDocument: aws.String("{\"Version\": \"2012-10-17\",\"Statement\": [{\"Effect\": \"Allow\",\"Principal\": {\"Service\": \"ec2.amazonaws.com\"},\"Action\": \"sts:AssumeRole\"}, {\"Effect\": \"Allow\",\"Principal\": {\"Service\": \"eks.amazonaws.com\"},\"Action\": \"sts:AssumeRole\"}]}"),
-		Description:              aws.String("Role description"),
-		RoleName:                 aws.String("managed-nodegroup-scope"),
+		Description:              aws.String("Kubeprov library role"),
+		RoleName:                 aws.String(e.conf.RoleName),
 	}
 	role, err := e.iam.CreateRole(params)
 	if err != nil {
@@ -60,16 +64,16 @@ func (e *EKSClient) CreateRole(name string) (*iam.Role, error) {
 	}
 	return role.Role, nil
 }
-func (e *EKSClient) DeleteRole(name string) error {
+func (e *EKSClient) DeleteRole() error {
 	policies, err := e.iam.ListAttachedRolePolicies(&iam.ListAttachedRolePoliciesInput{
-		RoleName: aws.String(name),
+		RoleName: aws.String(e.conf.RoleName),
 	})
 	if err != nil {
 		return err
 	}
 	for _, policy := range policies.AttachedPolicies {
 		_, err := e.iam.DetachRolePolicy(&iam.DetachRolePolicyInput{
-			RoleName:  aws.String(name),
+			RoleName:  aws.String(e.conf.RoleName),
 			PolicyArn: policy.PolicyArn,
 		})
 		if err != nil {
@@ -77,7 +81,7 @@ func (e *EKSClient) DeleteRole(name string) error {
 		}
 	}
 	params := &iam.DeleteRoleInput{
-		RoleName: aws.String(name),
+		RoleName: aws.String(e.conf.RoleName),
 	}
 	_, err = e.iam.DeleteRole(params)
 	return err
@@ -104,9 +108,13 @@ func (e *EKSClient) CreateCluster(roleArn *string) error {
 	if err != nil {
 		return err
 	}
+	reqToken, err := uuid.NewRandom()
+	if err != nil {
+		return err
+	}
 	result, err := e.eks.CreateCluster(&eks.CreateClusterInput{
-		ClientRequestToken: aws.String("1d2129a1-3d38-460a-9756-e5b91fddb951"),
-		Name:               aws.String("library-created"),
+		ClientRequestToken: aws.String(reqToken.String()),
+		Name:               aws.String(e.conf.ClusterName),
 		ResourcesVpcConfig: &eks.VpcConfigRequest{
 			SecurityGroupIds: secGroups,
 			SubnetIds:        subnets,
@@ -161,13 +169,13 @@ func (e *EKSClient) GetAllSecurityGroups() ([]*string, error) {
 	return secGroups, nil
 }
 
-func (e *EKSClient) WaitClusterUntilAvailable(name string) error {
+func (e *EKSClient) WaitClusterUntilAvailable() error {
 	ticker := time.NewTicker(time.Second)
 	for {
 		select {
 		case <-ticker.C:
 			cluster, err := e.eks.DescribeCluster(&eks.DescribeClusterInput{
-				Name: aws.String(name),
+				Name: aws.String(e.conf.ClusterName),
 			})
 			if err != nil {
 				return err
@@ -189,19 +197,22 @@ func (e *EKSClient) CreateNodeGroup(role *iam.Role) error {
 	if err != nil {
 		return err
 	}
-	//amiID := "ami-068d000e86e5d6a81"
-	nodeGroup, err := e.eks.CreateNodegroup(&eks.CreateNodegroupInput{
-		ClusterName:        aws.String("library-created"),
-		AmiType:            aws.String("AL2_x86_64"),
-		ClientRequestToken: aws.String("asdomasodmaodma"),
+	reqToken, err := uuid.NewRandom()
+	if err != nil {
+		return err
+	}
+	_, err = e.eks.CreateNodegroup(&eks.CreateNodegroupInput{
+		ClusterName:        aws.String(e.conf.ClusterName),
+		AmiType:            aws.String(e.conf.AMIType),
+		ClientRequestToken: aws.String(reqToken.String()),
 		InstanceTypes: []*string{
-			aws.String("m5.large"),
+			aws.String(e.conf.InstanceType),
 		},
-		NodegroupName: aws.String("library-created"),
+		NodegroupName: aws.String(e.conf.NodegroupName()),
 		ScalingConfig: &eks.NodegroupScalingConfig{
-			DesiredSize: aws.Int64(3),
-			MaxSize:     aws.Int64(3),
-			MinSize:     aws.Int64(2),
+			DesiredSize: aws.Int64(e.conf.DesiredState),
+			MaxSize:     aws.Int64(e.conf.MaxSize),
+			MinSize:     aws.Int64(e.conf.MinSize),
 		},
 		Subnets:  subnets,
 		NodeRole: role.Arn,
@@ -209,21 +220,56 @@ func (e *EKSClient) CreateNodeGroup(role *iam.Role) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println(nodeGroup)
 	return nil
 }
 
-func (e *EKSClient) DeleteNodeGroup(role *iam.Role) error {
+func (e *EKSClient) DeleteNodeGroup() error {
 	_, err := e.eks.DeleteNodegroup(&eks.DeleteNodegroupInput{
-		ClusterName:   aws.String("library-created"),
-		NodegroupName: aws.String("library-created"),
+		ClusterName:   aws.String(e.conf.ClusterName),
+		NodegroupName: aws.String(e.conf.NodegroupName()),
 	})
 	return err
 }
 
 func (e *EKSClient) DeleteCluster() error {
 	_, err := e.eks.DeleteCluster(&eks.DeleteClusterInput{
-		Name: aws.String("library-created"),
+		Name: aws.String(e.conf.ClusterName),
 	})
 	return err
+}
+
+func (e *EKSClient) ProvisionCluster() error {
+	role, err := e.CreateRole()
+	if err != nil {
+		return err
+	}
+	err = e.CreateCluster(role.Arn)
+	if err != nil {
+		return err
+	}
+	err = e.WaitClusterUntilAvailable()
+	if err != nil {
+		return err
+	}
+	err = e.CreateNodeGroup(role)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (e *EKSClient) UnprovisionCluster() error {
+	err := e.DeleteNodeGroup()
+	if err != nil {
+		return err
+	}
+	err = e.DeleteCluster()
+	if err != nil {
+		return err
+	}
+	err = e.DeleteRole()
+	if err != nil {
+		return err
+	}
+	return nil
 }
