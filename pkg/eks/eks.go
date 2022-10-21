@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/iam"
 	"github.com/gen1us2k/kubeprov/pkg/config"
 	"github.com/google/uuid"
+	"github.com/pkg/errors"
 )
 
 type (
@@ -47,28 +48,35 @@ func (e *EKSClient) CreateRole() (*iam.Role, error) {
 		Description:              aws.String("Kubeprov library role"),
 		RoleName:                 aws.String(e.conf.RoleName),
 	}
-	role, err := e.iam.CreateRole(params)
-	if err != nil {
-		return nil, err
+	var role *iam.Role
+	output, err := e.iam.GetRole(&iam.GetRoleInput{RoleName: aws.String(e.conf.RoleName)})
+	if output == nil && err != nil {
+		output, err := e.iam.CreateRole(params)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed creating role")
+		}
+		role = output.Role
+	} else {
+		role = output.Role
 	}
 
 	for _, policy := range managedPolicyArns {
 		_, err := e.iam.AttachRolePolicy(&iam.AttachRolePolicyInput{
 			PolicyArn: aws.String(policy),
-			RoleName:  role.Role.RoleName,
+			RoleName:  aws.String(e.conf.RoleName),
 		})
 		if err != nil {
-			return nil, err
+			return nil, errors.Wrap(err, "failed attaching role policy")
 		}
 	}
-	return role.Role, nil
+	return role, nil
 }
 func (e *EKSClient) DeleteRole() error {
 	policies, err := e.iam.ListAttachedRolePolicies(&iam.ListAttachedRolePoliciesInput{
 		RoleName: aws.String(e.conf.RoleName),
 	})
 	if err != nil {
-		return err
+		return errors.Wrap(err, "failed listing attached roles")
 	}
 	for _, policy := range policies.AttachedPolicies {
 		_, err := e.iam.DetachRolePolicy(&iam.DetachRolePolicyInput{
@@ -76,20 +84,23 @@ func (e *EKSClient) DeleteRole() error {
 			PolicyArn: policy.PolicyArn,
 		})
 		if err != nil {
-			return err
+			return errors.Wrap(err, "failed detaching policy")
 		}
 	}
 	params := &iam.DeleteRoleInput{
 		RoleName: aws.String(e.conf.RoleName),
 	}
 	_, err = e.iam.DeleteRole(params)
-	return err
+	if err != nil {
+		return errors.Wrap(err, "failed deleting role")
+	}
+	return nil
 }
 
 func (e *EKSClient) DescribeRole(name string) (*iam.Role, error) {
 	role, err := e.iam.GetRole(&iam.GetRoleInput{RoleName: aws.String(name)})
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "failed getting role")
 	}
 	return role.Role, nil
 }
@@ -97,21 +108,21 @@ func (e *EKSClient) DescribeRole(name string) (*iam.Role, error) {
 func (e *EKSClient) CreateCluster(roleArn *string) error {
 	vpcID, err := e.GetDefaultVPC()
 	if err != nil {
-		return err
+		return errors.Wrap(err, "failed describing VPC")
 	}
 	subnets, err := e.GetAllSubnets(vpcID)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "failed getting all subnets")
 	}
-	secGroups, err := e.GetAllSecurityGroups()
+	secGroups, err := e.GetAllSecurityGroups(vpcID)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "failed getting all secirity groups")
 	}
 	reqToken, err := uuid.NewRandom()
 	if err != nil {
 		return err
 	}
-	result, err := e.eks.CreateCluster(&eks.CreateClusterInput{
+	_, err = e.eks.CreateCluster(&eks.CreateClusterInput{
 		ClientRequestToken: aws.String(reqToken.String()),
 		Name:               aws.String(e.conf.ClusterName),
 		ResourcesVpcConfig: &eks.VpcConfigRequest{
@@ -120,8 +131,10 @@ func (e *EKSClient) CreateCluster(roleArn *string) error {
 		},
 		RoleArn: roleArn,
 	})
-	fmt.Println(result)
-	return err
+	if err != nil {
+		return errors.Wrap(err, "failed creating cluster")
+	}
+	return nil
 }
 func (e *EKSClient) GetDefaultVPC() (*string, error) {
 	vpcResponse, err := e.ec2.DescribeVpcs(new(ec2.DescribeVpcsInput))
@@ -156,8 +169,17 @@ func (e *EKSClient) GetAllSubnets(vpcID *string) ([]*string, error) {
 	}
 	return subnets, nil
 }
-func (e *EKSClient) GetAllSecurityGroups() ([]*string, error) {
-	secResponse, err := e.ec2.DescribeSecurityGroups(new(ec2.DescribeSecurityGroupsInput))
+func (e *EKSClient) GetAllSecurityGroups(vpcID *string) ([]*string, error) {
+	secResponse, err := e.ec2.DescribeSecurityGroups(&ec2.DescribeSecurityGroupsInput{
+		Filters: []*ec2.Filter{
+			{
+				Name: aws.String("vpc-id"),
+				Values: []*string{
+					vpcID,
+				},
+			},
+		},
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -165,6 +187,7 @@ func (e *EKSClient) GetAllSecurityGroups() ([]*string, error) {
 	for _, group := range secResponse.SecurityGroups {
 		secGroups = append(secGroups, group.GroupId)
 	}
+	fmt.Println(secGroups)
 	return secGroups, nil
 }
 
