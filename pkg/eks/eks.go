@@ -1,8 +1,6 @@
 package eks
 
 import (
-	"fmt"
-
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ec2"
@@ -187,7 +185,6 @@ func (e *EKSClient) GetAllSecurityGroups(vpcID *string) ([]*string, error) {
 	for _, group := range secResponse.SecurityGroups {
 		secGroups = append(secGroups, group.GroupId)
 	}
-	fmt.Println(secGroups)
 	return secGroups, nil
 }
 
