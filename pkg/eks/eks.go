@@ -2,7 +2,6 @@ package eks
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -170,22 +169,26 @@ func (e *EKSClient) GetAllSecurityGroups() ([]*string, error) {
 }
 
 func (e *EKSClient) WaitClusterUntilAvailable() error {
-	ticker := time.NewTicker(time.Second)
-	for {
-		select {
-		case <-ticker.C:
-			cluster, err := e.eks.DescribeCluster(&eks.DescribeClusterInput{
-				Name: aws.String(e.conf.ClusterName),
-			})
-			if err != nil {
-				return err
-			}
-			fmt.Println(*cluster.Cluster.Status)
-			if *cluster.Cluster.Status == "ACTIVE" {
-				return nil
-			}
-		}
-	}
+	return e.eks.WaitUntilClusterActive(&eks.DescribeClusterInput{
+		Name: aws.String(e.conf.ClusterName),
+	})
+}
+func (e *EKSClient) WaitClusterUntilDeleted() error {
+	return e.eks.WaitUntilClusterDeleted(&eks.DescribeClusterInput{
+		Name: aws.String(e.conf.ClusterName),
+	})
+}
+func (e *EKSClient) WaitUntilNodegroupActive() error {
+	return e.eks.WaitUntilNodegroupActive(&eks.DescribeNodegroupInput{
+		ClusterName:   aws.String(e.conf.ClusterName),
+		NodegroupName: aws.String(e.conf.NodegroupName()),
+	})
+}
+func (e *EKSClient) WaitUntilNodegroupDeleted() error {
+	return e.eks.WaitUntilNodegroupDeleted(&eks.DescribeNodegroupInput{
+		ClusterName:   aws.String(e.conf.ClusterName),
+		NodegroupName: aws.String(e.conf.NodegroupName()),
+	})
 }
 
 func (e *EKSClient) CreateNodeGroup(role *iam.Role) error {
@@ -255,6 +258,10 @@ func (e *EKSClient) ProvisionCluster() error {
 	if err != nil {
 		return err
 	}
+	err = e.WaitUntilNodegroupActive()
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -263,7 +270,15 @@ func (e *EKSClient) UnprovisionCluster() error {
 	if err != nil {
 		return err
 	}
+	err = e.WaitUntilNodegroupDeleted()
+	if err != nil {
+		return err
+	}
 	err = e.DeleteCluster()
+	if err != nil {
+		return err
+	}
+	err = e.WaitClusterUntilDeleted()
 	if err != nil {
 		return err
 	}
